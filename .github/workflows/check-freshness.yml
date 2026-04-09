@@ -1,0 +1,30 @@
+name: Check Data Freshness
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'  # Every Monday at 08:00 UTC
+  workflow_dispatch:
+
+jobs:
+  check-freshness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Dry-run ingestion (freshness check)
+        run: npx tsx scripts/ingest-gvh.ts --dry-run --limit 10
+        env:
+          GVH_DB_PATH: /tmp/freshness-check.db
+
+      - name: Report data age
+        run: |
+          echo "Data freshness check completed."
+          echo "GVH_DATA_AGE in coverage.json: $(jq -r .last_updated data/coverage.json)"

@@ -1,0 +1,29 @@
+{
+  "mcp": "eu.ansvar/hungarian-competition-mcp",
+  "sources": [
+    {
+      "name": "GVH",
+      "full_name": "Gazdasági Versenyhivatal — Hungarian Competition Authority",
+      "url": "https://www.gvh.hu/",
+      "coverage": {
+        "decisions": [
+          "abuse_of_dominance",
+          "cartel",
+          "unfair_commercial_practice",
+          "sector_inquiry"
+        ],
+        "mergers": [
+          "cleared",
+          "cleared_with_conditions",
+          "blocked",
+          "withdrawn"
+        ],
+        "period_from": "2000",
+        "period_to": "present"
+      }
+    }
+  ],
+  "last_updated": "2024-12-31",
+  "update_schedule": "Weekly (Sundays at 02:00 UTC)",
+  "ingest_script": "scripts/ingest-gvh.ts"
+}

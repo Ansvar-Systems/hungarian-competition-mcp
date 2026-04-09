@@ -1,0 +1,64 @@
+name: Ingest GVH Data
+
+on:
+  schedule:
+    - cron: '0 2 * * 0'  # Every Sunday at 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      year_from:
+        description: 'Start year for ingestion (default: 2000)'
+        required: false
+        default: '2000'
+      year_to:
+        description: 'End year for ingestion (default: current year)'
+        required: false
+      force:
+        description: 'Force re-ingestion even if records exist'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run GVH ingestion
+        run: |
+          ARGS="--year-from ${{ github.event.inputs.year_from || '2000' }}"
+          if [ -n "${{ github.event.inputs.year_to }}" ]; then
+            ARGS="$ARGS --year-to ${{ github.event.inputs.year_to }}"
+          fi
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+            ARGS="$ARGS --force"
+          fi
+          npx tsx scripts/ingest-gvh.ts $ARGS
+        env:
+          GVH_DB_PATH: data/database.db
+
+      - name: Update coverage metadata
+        run: |
+          TODAY=$(date -u +%Y-%m-%d)
+          jq --arg date "$TODAY" '.last_updated = $date' data/coverage.json > /tmp/coverage.json
+          mv /tmp/coverage.json data/coverage.json
+
+      - name: Compress database
+        run: gzip -9 -k data/database.db -c > data/database.db.gz
+
+      - name: Upload database as release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: gvh-database-${{ github.run_id }}
+          path: |
+            data/database.db.gz
+            data/coverage.json
+          retention-days: 90

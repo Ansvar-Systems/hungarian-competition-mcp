@@ -30,12 +30,14 @@ import {
   getMerger,
   listSectors,
 } from "./db.js";
+import { buildCitation } from "./utils/citation.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const PORT = parseInt(process.env["PORT"] ?? "3000", 10);
 const SERVER_NAME = "hungarian-competition-mcp";
+const GVH_DATA_AGE = process.env["GVH_DATA_AGE"] ?? "2024-12-31";
 
 let pkgVersion = "0.1.0";
 try {
@@ -47,29 +49,46 @@ try {
   // fallback
 }
 
-// --- Tool definitions (shared with index.ts) ---------------------------------
+function getMeta(sourceUrl?: string) {
+  return {
+    disclaimer:
+      "This data is sourced from GVH (Gazdasági Versenyhivatal) public records. Always verify with official sources before relying on this information for legal or compliance purposes.",
+    data_age: GVH_DATA_AGE,
+    copyright:
+      "© GVH (Gazdasági Versenyhivatal) — Hungarian Competition Authority. Data used for informational purposes.",
+    ...(sourceUrl ? { source_url: sourceUrl } : {}),
+  };
+}
+
+// --- Tool definitions --------------------------------------------------------
 
 const TOOLS = [
   {
     name: "hu_comp_search_decisions",
     description:
-      "Full-text search across Bundeskartellamt enforcement decisions (abuse of dominance, cartel, sector inquiries). Returns matching decisions with case number, parties, outcome, fine amount, and GVH articles cited.",
+      "Full-text search across GVH competition enforcement decisions. Covers abuse of dominance, cartel enforcement, unfair commercial practices, and sector inquiries under Hungarian competition law (Tpvt — 1996. évi LVII. törvény). Returns matching decisions with case number, parties, sector, outcome, and summary.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        query: { type: "string", description: "Search query (e.g., 'Marktmissbrauch', 'Facebook', 'Preisabsprache')" },
+        query: {
+          type: "string",
+          description: "Search query (e.g., 'erőfölénnyel való visszaélés', 'kartell', 'tisztességtelen verseny')",
+        },
         type: {
           type: "string",
-          enum: ["abuse_of_dominance", "cartel", "merger", "sector_inquiry"],
-          description: "Filter by decision type. Optional.",
+          enum: ["abuse_of_dominance", "cartel", "sector_inquiry", "unfair_commercial_practice"],
+          description: "Filter by case type. Optional.",
         },
-        sector: { type: "string", description: "Filter by sector ID. Optional." },
+        sector: {
+          type: "string",
+          description: "Filter by industry sector (e.g., 'energy', 'telecommunications', 'retail'). Optional.",
+        },
         outcome: {
           type: "string",
-          enum: ["prohibited", "cleared", "cleared_with_conditions", "fine"],
-          description: "Filter by outcome. Optional.",
+          enum: ["infringement", "commitment", "no_infringement", "fine"],
+          description: "Filter by decision outcome. Optional.",
         },
-        limit: { type: "number", description: "Max results (default 20)." },
+        limit: { type: "number", description: "Maximum number of results to return. Defaults to 20." },
       },
       required: ["query"],
     },
@@ -77,11 +96,11 @@ const TOOLS = [
   {
     name: "hu_comp_get_decision",
     description:
-      "Get a specific Bundeskartellamt decision by case number (e.g., 'B6-22/16').",
+      "Get a specific GVH competition decision by case number (e.g., 'Vj/001/2024', 'Vj/050/2023').",
     inputSchema: {
       type: "object" as const,
       properties: {
-        case_number: { type: "string", description: "Case number (e.g., 'B6-22/16', 'B2-94/12')" },
+        case_number: { type: "string", description: "GVH case number" },
       },
       required: ["case_number"],
     },
@@ -89,18 +108,21 @@ const TOOLS = [
   {
     name: "hu_comp_search_mergers",
     description:
-      "Search Bundeskartellamt merger control decisions (merger control).",
+      "Search GVH merger control decisions. Returns merger cases with acquiring party, target, sector, and clearance outcome under Hungarian merger control rules (Tpvt).",
     inputSchema: {
       type: "object" as const,
       properties: {
-        query: { type: "string", description: "Search query (e.g., 'Vonovia', 'Energieversorgung')" },
-        sector: { type: "string", description: "Filter by sector ID. Optional." },
+        query: {
+          type: "string",
+          description: "Search query (e.g., 'összefonódás', 'felvásárlás', 'energia')",
+        },
+        sector: { type: "string", description: "Filter by industry sector. Optional." },
         outcome: {
           type: "string",
-          enum: ["cleared", "cleared_phase1", "cleared_with_conditions", "prohibited"],
+          enum: ["cleared", "cleared_with_conditions", "blocked", "withdrawn"],
           description: "Filter by merger outcome. Optional.",
         },
-        limit: { type: "number", description: "Max results (default 20)." },
+        limit: { type: "number", description: "Maximum number of results to return. Defaults to 20." },
       },
       required: ["query"],
     },
@@ -108,11 +130,11 @@ const TOOLS = [
   {
     name: "hu_comp_get_merger",
     description:
-      "Get a specific merger control decision by case number (e.g., 'B1-35/21').",
+      "Get a specific GVH merger control decision by case number (e.g., 'Vj/M/10/2024').",
     inputSchema: {
       type: "object" as const,
       properties: {
-        case_number: { type: "string", description: "Merger case number (e.g., 'B1-35/21')" },
+        case_number: { type: "string", description: "GVH merger case number" },
       },
       required: ["case_number"],
     },
@@ -120,7 +142,19 @@ const TOOLS = [
   {
     name: "hu_comp_list_sectors",
     description:
-      "List all sectors with Bundeskartellamt enforcement activity, including decision and merger counts.",
+      "List all industry sectors with GVH enforcement activity covered in this MCP, with decision and merger counts.",
+    inputSchema: { type: "object" as const, properties: {}, required: [] },
+  },
+  {
+    name: "hu_comp_list_sources",
+    description:
+      "List the data sources used by this MCP server, including GVH website URLs, data coverage, and update schedule.",
+    inputSchema: { type: "object" as const, properties: {}, required: [] },
+  },
+  {
+    name: "hu_comp_check_data_freshness",
+    description:
+      "Check the freshness of the data in this MCP server. Returns the last known data ingestion date and coverage period.",
     inputSchema: { type: "object" as const, properties: {}, required: [] },
   },
   {
@@ -135,9 +169,9 @@ const TOOLS = [
 
 const SearchDecisionsArgs = z.object({
   query: z.string().min(1),
-  type: z.enum(["abuse_of_dominance", "cartel", "merger", "sector_inquiry"]).optional(),
+  type: z.enum(["abuse_of_dominance", "cartel", "sector_inquiry", "unfair_commercial_practice"]).optional(),
   sector: z.string().optional(),
-  outcome: z.enum(["prohibited", "cleared", "cleared_with_conditions", "fine"]).optional(),
+  outcome: z.enum(["infringement", "commitment", "no_infringement", "fine"]).optional(),
   limit: z.number().int().positive().max(100).optional(),
 });
 
@@ -148,7 +182,7 @@ const GetDecisionArgs = z.object({
 const SearchMergersArgs = z.object({
   query: z.string().min(1),
   sector: z.string().optional(),
-  outcome: z.enum(["cleared", "cleared_phase1", "cleared_with_conditions", "prohibited"]).optional(),
+  outcome: z.enum(["cleared", "cleared_with_conditions", "blocked", "withdrawn"]).optional(),
   limit: z.number().int().positive().max(100).optional(),
 });
 
@@ -171,15 +205,29 @@ function createMcpServer(): Server {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args = {} } = request.params;
 
-    function textContent(data: unknown) {
+    function textContent(data: unknown, sourceUrl?: string) {
+      const meta = getMeta(sourceUrl);
+      const payload =
+        typeof data === "object" && data !== null
+          ? { ...(data as object), _meta: meta }
+          : { data, _meta: meta };
       return {
-        content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+        content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
       };
     }
 
-    function errorContent(message: string) {
+    function errorContent(message: string, errorType = "tool_error") {
       return {
-        content: [{ type: "text" as const, text: message }],
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              { error: message, _meta: getMeta(), _error_type: errorType },
+              null,
+              2,
+            ),
+          },
+        ],
         isError: true as const,
       };
     }
@@ -202,9 +250,22 @@ function createMcpServer(): Server {
           const parsed = GetDecisionArgs.parse(args);
           const decision = getDecision(parsed.case_number);
           if (!decision) {
-            return errorContent(`Decision not found: ${parsed.case_number}`);
+            return errorContent(`Decision not found: ${parsed.case_number}`, "not_found");
           }
-          return textContent(decision);
+          const d = decision as Record<string, unknown>;
+          return textContent(
+            {
+              ...decision,
+              _citation: buildCitation(
+                String(d.case_number ?? parsed.case_number),
+                String(d.title ?? d.case_number ?? parsed.case_number),
+                "hu_comp_get_decision",
+                { case_number: parsed.case_number },
+                d.url as string | undefined,
+              ),
+            },
+            d.url as string | undefined,
+          );
         }
 
         case "hu_comp_search_mergers": {
@@ -222,9 +283,22 @@ function createMcpServer(): Server {
           const parsed = GetMergerArgs.parse(args);
           const merger = getMerger(parsed.case_number);
           if (!merger) {
-            return errorContent(`Merger case not found: ${parsed.case_number}`);
+            return errorContent(`Merger case not found: ${parsed.case_number}`, "not_found");
           }
-          return textContent(merger);
+          const m = merger as Record<string, unknown>;
+          return textContent(
+            {
+              ...merger,
+              _citation: buildCitation(
+                String(m.case_number ?? parsed.case_number),
+                String(m.title ?? m.case_number ?? parsed.case_number),
+                "hu_comp_get_merger",
+                { case_number: parsed.case_number },
+                m.url as string | undefined,
+              ),
+            },
+            m.url as string | undefined,
+          );
         }
 
         case "hu_comp_list_sectors": {
@@ -232,23 +306,57 @@ function createMcpServer(): Server {
           return textContent({ sectors, count: sectors.length });
         }
 
+        case "hu_comp_list_sources": {
+          return textContent({
+            sources: [
+              {
+                name: "GVH",
+                full_name: "Gazdasági Versenyhivatal — Hungarian Competition Authority",
+                url: "https://www.gvh.hu/",
+                coverage: {
+                  decisions: ["abuse_of_dominance", "cartel", "unfair_commercial_practice", "sector_inquiry"],
+                  mergers: ["cleared", "cleared_with_conditions", "blocked", "withdrawn"],
+                  period_from: "2000",
+                  period_to: "present",
+                },
+              },
+            ],
+            ingest_script: "scripts/ingest-gvh.ts",
+            update_schedule: "Weekly (Sundays at 02:00 UTC)",
+          });
+        }
+
+        case "hu_comp_check_data_freshness": {
+          return textContent({
+            data_age: GVH_DATA_AGE,
+            status: "ok",
+            source: "GVH (https://www.gvh.hu/)",
+            note: "Set GVH_DATA_AGE environment variable to reflect the actual ingestion date.",
+          });
+        }
+
         case "hu_comp_about": {
           return textContent({
             name: SERVER_NAME,
             version: pkgVersion,
             description:
-              "Bundeskartellamt (German Federal Cartel Office) MCP server. Provides access to German competition law enforcement decisions, merger control cases, and sector enforcement data under the GVH (Gesetz gegen Wettbewerbsbeschränkungen).",
-            data_source: "Bundeskartellamt (https://www.bundeskartellamt.de/)",
+              "GVH (Gazdasági Versenyhivatal — Hungarian Competition Authority) MCP server. Provides access to competition enforcement decisions, merger control cases, and sector inquiries under Hungarian competition law (Tpvt — 1996. évi LVII. törvény).",
+            data_source: "GVH (https://www.gvh.hu/)",
+            coverage: {
+              decisions: "GVH abuse of dominance, cartel, unfair commercial practices, and sector inquiry decisions",
+              mergers: "GVH merger control decisions under Tpvt",
+              sectors: "Sectors with GVH enforcement activity",
+            },
             tools: TOOLS.map((t) => ({ name: t.name, description: t.description })),
           });
         }
 
         default:
-          return errorContent(`Unknown tool: ${name}`);
+          return errorContent(`Unknown tool: ${name}`, "unknown_tool");
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      return errorContent(`Error executing ${name}: ${message}`);
+      return errorContent(`Error executing ${name}: ${message}`, "tool_error");
     }
   });
 

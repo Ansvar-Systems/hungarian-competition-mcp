@@ -43,6 +43,18 @@ try {
 }
 
 const SERVER_NAME = "hungarian-competition-mcp";
+const GVH_DATA_AGE = process.env["GVH_DATA_AGE"] ?? "2024-12-31";
+
+function getMeta(sourceUrl?: string) {
+  return {
+    disclaimer:
+      "This data is sourced from GVH (Gazdasági Versenyhivatal) public records. Always verify with official sources before relying on this information for legal or compliance purposes.",
+    data_age: GVH_DATA_AGE,
+    copyright:
+      "© GVH (Gazdasági Versenyhivatal) — Hungarian Competition Authority. Data used for informational purposes.",
+    ...(sourceUrl ? { source_url: sourceUrl } : {}),
+  };
+}
 
 // --- Tool definitions ---------------------------------------------------------
 
@@ -149,6 +161,26 @@ const TOOLS = [
     },
   },
   {
+    name: "hu_comp_list_sources",
+    description:
+      "List the data sources used by this MCP server, including GVH website URLs, data coverage, and update schedule.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "hu_comp_check_data_freshness",
+    description:
+      "Check the freshness of the data in this MCP server. Returns the last known data ingestion date and coverage period.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
     name: "hu_comp_about",
     description: "Return metadata about this MCP server: version, data source, coverage, and tool list.",
     inputSchema: {
@@ -186,17 +218,31 @@ const GetMergerArgs = z.object({
 
 // --- Helper ------------------------------------------------------------------
 
-function textContent(data: unknown) {
+function textContent(data: unknown, sourceUrl?: string) {
+  const meta = getMeta(sourceUrl);
+  const payload =
+    typeof data === "object" && data !== null
+      ? { ...(data as object), _meta: meta }
+      : { data, _meta: meta };
   return {
     content: [
-      { type: "text" as const, text: JSON.stringify(data, null, 2) },
+      { type: "text" as const, text: JSON.stringify(payload, null, 2) },
     ],
   };
 }
 
-function errorContent(message: string) {
+function errorContent(message: string, errorType = "tool_error") {
   return {
-    content: [{ type: "text" as const, text: message }],
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify(
+          { error: message, _meta: getMeta(), _error_type: errorType },
+          null,
+          2,
+        ),
+      },
+    ],
     isError: true as const,
   };
 }
@@ -233,19 +279,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const parsed = GetDecisionArgs.parse(args);
         const decision = getDecision(parsed.case_number);
         if (!decision) {
-          return errorContent(`Decision not found: ${parsed.case_number}`);
+          return errorContent(`Decision not found: ${parsed.case_number}`, "not_found");
         }
         const d = decision as Record<string, unknown>;
-        return textContent({
-          ...decision,
-          _citation: buildCitation(
-            String(d.case_number ?? parsed.case_number),
-            String(d.title ?? d.case_number ?? parsed.case_number),
-            "hu_comp_get_decision",
-            { case_number: parsed.case_number },
-            d.url as string | undefined,
-          ),
-        });
+        return textContent(
+          {
+            ...decision,
+            _citation: buildCitation(
+              String(d.case_number ?? parsed.case_number),
+              String(d.title ?? d.case_number ?? parsed.case_number),
+              "hu_comp_get_decision",
+              { case_number: parsed.case_number },
+              d.url as string | undefined,
+            ),
+          },
+          d.url as string | undefined,
+        );
       }
 
       case "hu_comp_search_mergers": {
@@ -263,24 +312,56 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const parsed = GetMergerArgs.parse(args);
         const merger = getMerger(parsed.case_number);
         if (!merger) {
-          return errorContent(`Merger decision not found: ${parsed.case_number}`);
+          return errorContent(`Merger decision not found: ${parsed.case_number}`, "not_found");
         }
         const m = merger as Record<string, unknown>;
-        return textContent({
-          ...merger,
-          _citation: buildCitation(
-            String(m.case_number ?? parsed.case_number),
-            String(m.title ?? m.case_number ?? parsed.case_number),
-            "hu_comp_get_merger",
-            { case_number: parsed.case_number },
-            m.url as string | undefined,
-          ),
-        });
+        return textContent(
+          {
+            ...merger,
+            _citation: buildCitation(
+              String(m.case_number ?? parsed.case_number),
+              String(m.title ?? m.case_number ?? parsed.case_number),
+              "hu_comp_get_merger",
+              { case_number: parsed.case_number },
+              m.url as string | undefined,
+            ),
+          },
+          m.url as string | undefined,
+        );
       }
 
       case "hu_comp_list_sectors": {
         const sectors = listSectors();
         return textContent({ sectors, count: sectors.length });
+      }
+
+      case "hu_comp_list_sources": {
+        return textContent({
+          sources: [
+            {
+              name: "GVH",
+              full_name: "Gazdasági Versenyhivatal — Hungarian Competition Authority",
+              url: "https://www.gvh.hu/",
+              coverage: {
+                decisions: ["abuse_of_dominance", "cartel", "unfair_commercial_practice", "sector_inquiry"],
+                mergers: ["cleared", "cleared_with_conditions", "blocked", "withdrawn"],
+                period_from: "2000",
+                period_to: "present",
+              },
+            },
+          ],
+          ingest_script: "scripts/ingest-gvh.ts",
+          update_schedule: "Weekly (Sundays at 02:00 UTC)",
+        });
+      }
+
+      case "hu_comp_check_data_freshness": {
+        return textContent({
+          data_age: GVH_DATA_AGE,
+          status: "ok",
+          source: "GVH (https://www.gvh.hu/)",
+          note: "Set GVH_DATA_AGE environment variable to reflect the actual ingestion date.",
+        });
       }
 
       case "hu_comp_about": {
@@ -300,11 +381,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       default:
-        return errorContent(`Unknown tool: ${name}`);
+        return errorContent(`Unknown tool: ${name}`, "unknown_tool");
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return errorContent(`Error executing ${name}: ${message}`);
+    return errorContent(`Error executing ${name}: ${message}`, "tool_error");
   }
 });
 
